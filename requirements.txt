@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+opencv-python
+pillow
+scikit-image
+numpy
+anthropic
+python-pptx
+python-dotenv

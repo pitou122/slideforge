@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Video → PPTX</title>
+<style>
+  :root { --bg:#0a0a0a; --fg:#e5e5e5; --muted:#888; --accent:#f97316; --panel:#161616; --line:#2a2a2a; }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    margin: 0; padding: 36px 16px; display: flex; justify-content: center;
+  }
+  .wrap { width: 100%; max-width: 720px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h1 .accent { color: var(--accent); }
+  p.sub { color: var(--muted); margin: 0 0 26px; font-size: 13px; }
+
+  .stage {
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 18px; margin-bottom: 16px; transition: opacity .15s;
+  }
+  .stage.locked { opacity: .4; pointer-events: none; }
+  .stage h2 {
+    font-size: 14px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .stage h2 .num {
+    background: var(--accent); color: #0a0a0a; border-radius: 50%;
+    width: 20px; height: 20px; display: inline-flex;
+    align-items: center; justify-content: center; font-size: 12px; flex: none;
+  }
+  .stage h2 .tick { color: #1f9d54; margin-left: auto; }
+
+  #drop {
+    border: 2px dashed var(--line); border-radius: 6px; padding: 30px 16px;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); background: var(--panel); }
+  #drop .hint { color: var(--muted); font-size: 13px; }
+  #fileName { color: var(--accent); margin-top: 8px; font-size: 13px; word-break: break-all; }
+
+  .row { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+  .row label { width: 160px; font-size: 13px; }
+  .row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .row .val { width: 46px; text-align: right; color: var(--accent); font-size: 13px; }
+
+  button {
+    padding: 10px 16px; border: none; border-radius: 6px;
+    background: var(--accent); color: #0a0a0a; font-weight: bold;
+    font-family: inherit; font-size: 13px; cursor: pointer;
+  }
+  button:disabled { background: #333; color: var(--muted); cursor: not-allowed; }
+  button.ghost { background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
+  button.dl { background: #1f7a3f; color: #fff; }
+
+  .bar { height: 8px; background: var(--panel); border-radius: 4px; overflow: hidden; margin-top: 12px; }
+  .bar > div { height: 100%; width: 0%; background: var(--accent); transition: width .3s; }
+  .msg { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .msg.error { color: #ef4444; }
+  .msg .pct { color: var(--accent); margin-right: 8px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(150px,1fr)); gap: 10px; margin-top: 14px; }
+  .card { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel); }
+  .card.pick { cursor: pointer; }
+  .card img { width: 100%; display: block; }
+  .card .cap { font-size: 11px; padding: 5px 7px; color: var(--muted); display: flex; justify-content: space-between; }
+  .card.off { opacity: .32; }
+  .card .badge { color: var(--accent); }
+  .seltools { display: flex; gap: 8px; margin-top: 12px; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: normal; }
+  td.err { color: #ef4444; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Video <span class="accent">→</span> PPTX</h1>
+  <p class="sub">Run the pipeline one stage at a time. Inspect each stage's output before moving on.</p>
+
+  <!-- Stage 0: Upload -->
+  <div class="stage" id="panel-upload">
+    <h2><span class="num">1</span> Upload video <span class="tick hide" id="tick-upload">✓</span></h2>
+    <div id="drop">
+      <div>Drag &amp; drop a video here</div>
+      <div class="hint">or click to browse</div>
+      <div id="fileName"></div>
+    </div>
+    <input type="file" id="fileInput" accept="video/*" hidden>
+    <div class="row">
+      <label>Capture every (sec)</label>
+      <input type="range" id="interval" min="1" max="30" step="1" value="5">
+      <span class="val" id="intervalVal">5</span>
+    </div>
+    <p class="sub" style="margin:0 0 12px">Lower = more frames captured. Deselect duplicates in the next step.</p>
+    <button id="uploadBtn" disabled>Upload</button>
+  </div>
+
+  <!-- Stage 1: Extract & Detect -->
+  <div class="stage locked" id="panel-extract">
+    <h2><span class="num">2</span> Extract &amp; Detect slides <span class="tick hide" id="tick-extract">✓</span></h2>
+    <button id="extractBtn">Run Extract &amp; Detect</button>
+    <div class="bar hide" id="bar-extract"><div></div></div>
+    <div class="msg hide" id="msg-extract"></div>
+    <div id="slides-out"></div>
+  </div>
+
+  <!-- Stage 2: Vision -->
+  <div class="stage locked" id="panel-vision">
+    <h2><span class="num">3</span> Vision analysis <span class="tick hide" id="tick-vision">✓</span></h2>
+    <p class="sub" style="margin:0 0 10px">Sends only the selected slides to Claude Vision.</p>
+    <button id="visionBtn">Confirm selection &amp; analyze</button>
+    <div class="bar hide" id="bar-vision"><div></div></div>
+    <div class="msg hide" id="msg-vision"></div>
+    <div id="vision-out"></div>
+  </div>
+
+  <!-- Stage 3: Crop -->
+  <div class="stage locked" id="panel-crop">
+    <h2><span class="num">4</span> Crop charts &amp; images <span class="tick hide" id="tick-crop">✓</span></h2>
+    <button id="cropBtn">Run Crop</button>
+    <div class="bar hide" id="bar-crop"><div></div></div>
+    <div class="msg hide" id="msg-crop"></div>
+    <div id="crop-out"></div>
+  </div>
+
+  <!-- Stage 4: Build -->
+  <div class="stage locked" id="panel-build">
+    <h2><span class="num">5</span> Build PPTX <span class="tick hide" id="tick-build">✓</span></h2>
+    <button id="buildBtn">Run Build</button>
+    <div class="bar hide" id="bar-build"><div></div></div>
+    <div class="msg hide" id="msg-build"></div>
+    <div id="build-out" style="margin-top:14px"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let jobId = null;
+let selectedFile = null;
+
+// --- Stage 0: upload -------------------------------------------------------
+const drop = $("drop"), fileInput = $("fileInput");
+$("interval").oninput = (e) => $("intervalVal").textContent = parseInt(e.target.value);
+
+function pickFile(f) {
+  if (!f) return;
+  selectedFile = f;
+  $("fileName").textContent = f.name;
+  $("uploadBtn").disabled = false;
+}
+drop.onclick = () => fileInput.click();
+fileInput.onchange = () => pickFile(fileInput.files[0]);
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); pickFile(e.dataTransfer.files[0]); };
+
+$("uploadBtn").onclick = async () => {
+  if (!selectedFile) return;
+  $("uploadBtn").disabled = true;
+  const form = new FormData();
+  form.append("video", selectedFile);
+  form.append("interval", $("interval").value);
+  try {
+    const res = await fetch("/upload", { method: "POST", body: form });
+    if (!res.ok) throw new Error("Upload failed (" + res.status + ")");
+    jobId = (await res.json()).job_id;
+    $("tick-upload").classList.remove("hide");
+    $("panel-upload").classList.add("locked");
+    unlock("extract");
+  } catch (err) {
+    $("uploadBtn").disabled = false;
+    alert(err.message);
+  }
+};
+
+// --- Stage plumbing --------------------------------------------------------
+function unlock(stage) { $("panel-" + stage).classList.remove("locked"); }
+
+function showMsg(stage, text, isError) {
+  const m = $("msg-" + stage);
+  m.classList.remove("hide");
+  m.classList.toggle("error", !!isError);
+  m.innerHTML = isError ? "Error: " + text
+    : '<span class="pct" id="pct-' + stage + '"></span>' + text;
+}
+function setBar(stage, pct, text) {
+  $("bar-" + stage).classList.remove("hide");
+  $("bar-" + stage).firstElementChild.style.width = pct + "%";
+  showMsg(stage, text, false);
+  const p = $("pct-" + stage);
+  if (p) p.textContent = pct + "%";
+}
+
+// POST a stage endpoint, then poll status until it reaches doneStatus.
+function runStage(stage, runningStatus, doneStatus, onDone) {
+  return new Promise(async (resolve) => {
+    try {
+      const res = await fetch(`/jobs/${jobId}/${stage}`, { method: "POST" });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || ("HTTP " + res.status));
+      }
+    } catch (err) { showMsg(stage, err.message, true); return resolve(false); }
+
+    setBar(stage, 0, "Starting…");
+    const timer = setInterval(async () => {
+      try {
+        const job = await (await fetch(`/jobs/${jobId}/status`)).json();
+        setBar(stage, job.progress, job.message);
+        if (job.status === doneStatus) {
+          clearInterval(timer);
+          $("tick-" + stage).classList.remove("hide");
+          await onDone();
+          resolve(true);
+        } else if (job.status === "error") {
+          clearInterval(timer);
+          showMsg(stage, job.message, true);
+          resolve(false);
+        }
+      } catch (err) {
+        clearInterval(timer);
+        showMsg(stage, err.message, true);
+        resolve(false);
+      }
+    }, 2000);
+  });
+}
+
+// --- Stage 1: extract & detect --------------------------------------------
+$("extractBtn").onclick = async () => {
+  $("extractBtn").disabled = true;
+  $("slides-out").innerHTML = "";
+  const ok = await runStage("extract", "detecting", "detected", renderSlides);
+  $("extractBtn").disabled = false;
+  $("extractBtn").textContent = "Re-run Extract & Detect";
+  if (ok) unlock("vision");
+};
+
+async function renderSlides() {
+  const { slides } = await (await fetch(`/jobs/${jobId}/slides`)).json();
+  if (!slides.length) { $("slides-out").innerHTML = '<p class="sub">No slides detected.</p>'; return; }
+  let html = '<div class="seltools"><button class="ghost" id="selAll">Select all</button>'
+           + '<button class="ghost" id="selNone">Select none</button></div><div class="grid">';
+  for (const s of slides) {
+    html += `<div class="card pick ${s.selected ? "" : "off"}" data-id="${s.slide_id}">
+      <img src="${s.image_url}" loading="lazy">
+      <div class="cap"><span>${s.slide_id}</span>
+        <span class="badge">${Math.round(s.start_sec)}–${Math.round(s.end_sec)}s</span></div>
+    </div>`;
+  }
+  html += "</div>";
+  $("slides-out").innerHTML = html;
+  $("slides-out").querySelectorAll(".card.pick").forEach((c) => {
+    c.onclick = () => c.classList.toggle("off");
+  });
+  $("selAll").onclick = () => $("slides-out").querySelectorAll(".card").forEach(c => c.classList.remove("off"));
+  $("selNone").onclick = () => $("slides-out").querySelectorAll(".card").forEach(c => c.classList.add("off"));
+}
+
+// --- Stage 2: vision -------------------------------------------------------
+$("visionBtn").onclick = async () => {
+  const picked = [...$("slides-out").querySelectorAll(".card:not(.off)")].map(c => c.dataset.id);
+  if (!picked.length) { alert("Select at least one slide."); return; }
+  $("visionBtn").disabled = true;
+  try {
+    await fetch(`/jobs/${jobId}/select`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slide_ids: picked }),
+    });
+  } catch (err) { showMsg("vision", err.message, true); $("visionBtn").disabled = false; return; }
+  const ok = await runStage("vision", "analyzing", "analyzed", renderExtracted);
+  $("visionBtn").disabled = false;
+  if (ok) unlock("crop");
+};
+
+async function renderExtracted() {
+  const { slides } = await (await fetch(`/jobs/${jobId}/extracted`)).json();
+  let html = "<table><tr><th>Slide</th><th>Layout</th><th>Columns</th><th>Charts</th><th>Status</th></tr>";
+  for (const s of slides) {
+    html += `<tr><td>${s.slide_id}</td><td>${s.layout}</td><td>${s.columns}</td>
+      <td>${s.charts}</td><td class="${s.error ? "err" : ""}">${s.error ? "error" : "ok"}</td></tr>`;
+  }
+  $("vision-out").innerHTML = html + "</table>";
+}
+
+// --- Stage 3: crop ---------------------------------------------------------
+$("cropBtn").onclick = async () => {
+  $("cropBtn").disabled = true;
+  const ok = await runStage("crop", "cropping", "cropped", renderCrops);
+  $("cropBtn").disabled = false;
+  if (ok) unlock("build");
+};
+
+async function renderCrops() {
+  const { crops } = await (await fetch(`/jobs/${jobId}/crops`)).json();
+  if (!crops.length) { $("crop-out").innerHTML = '<p class="sub">No crops produced.</p>'; return; }
+  let html = '<div class="grid">';
+  for (const c of crops) {
+    html += `<div class="card"><img src="${c.image_url}" loading="lazy">
+      <div class="cap"><span>${c.name}</span></div></div>`;
+  }
+  $("crop-out").innerHTML = html + "</div>";
+}
+
+// --- Stage 4: build --------------------------------------------------------
+$("buildBtn").onclick = async () => {
+  $("buildBtn").disabled = true;
+  const ok = await runStage("build", "building", "done", async () => {
+    $("build-out").innerHTML =
+      `<button class="dl" onclick="window.location='/download/${jobId}'">Download PPTX</button>`;
+  });
+  $("buildBtn").disabled = false;
+};
+</script>
+</body>
+</html>
