@@ -1,7 +1,8 @@
 """Stage 5 — PPTX Generation.
 
 Rebuild the slide deck from the extracted JSON using python-pptx.
-See pipeline_spec.md for the authoritative spec.
+Element positions come directly from the Vision-returned bbox (fractions of
+the slide content area), mapped onto the 10"×5.625" PPTX canvas.
 """
 from __future__ import annotations
 
@@ -17,23 +18,22 @@ from pptx.util import Inches, Pt
 SLIDE_W = 10.0
 SLIDE_H = 5.625
 
-# Column X positions and widths per layout (inches).
+FONT_PT = {"title": 28, "subtitle": 20, "body": 12, "small": 10, "tiny": 8}
+
+# Fallback geometry used only when an element has no bbox.
+TITLE_BOX = {"x": 0.3, "y": 0.15, "w": 9.4, "h": 0.9}
+CONTENT_TOP = 1.2
+ELEMENT_GAP = 0.1
+BOTTOM_LIMIT = 5.3
+
 LAYOUTS = {
-    "single": {"x": [0.5], "w": [9.0]},
-    "two_column": {"x": [0.5, 5.25], "w": [4.5, 4.5]},
+    "single":       {"x": [0.5],        "w": [9.0]},
+    "two_column":   {"x": [0.5, 5.25],  "w": [4.5, 4.5]},
     "three_column": {"x": [0.5, 3.67, 6.84], "w": [2.9, 2.9, 2.9]},
 }
 
-FONT_PT = {"title": 28, "subtitle": 20, "body": 12, "small": 10, "tiny": 8}
-
-TITLE_BOX = {"x": 0.3, "y": 0.15, "w": 9.4, "h": 0.9}
-CONTENT_TOP = 1.2     # y where column content begins
-ELEMENT_GAP = 0.1     # vertical gap between stacked elements
-BOTTOM_LIMIT = 5.3    # skip an element whose bottom edge would exceed this
-
 
 def _rgb(hex_str: str | None, default: str = "000000") -> RGBColor:
-    """Parse a ``#RRGGBB`` string into an RGBColor, falling back to ``default``."""
     s = (hex_str or "").lstrip("#").strip()
     if len(s) == 6:
         try:
@@ -44,13 +44,6 @@ def _rgb(hex_str: str | None, default: str = "000000") -> RGBColor:
 
 
 def _resolve_layout(layout: str, columns: list) -> dict:
-    """Return a column-geometry dict sized to the actual column data.
-
-    The model's ``layout`` string can disagree with the number of columns it
-    returns (e.g. ``layout="single"`` with two columns). Trusting the string
-    would clamp every column to index 0 and render them on top of each other,
-    so geometry is derived from the real column count / indices instead.
-    """
     if columns:
         n = max(
             len(columns),
@@ -65,10 +58,18 @@ def _resolve_layout(layout: str, columns: list) -> dict:
     return LAYOUTS["single"]
 
 
+def _bbox_to_rect(bbox: list) -> tuple[float, float, float, float]:
+    """Convert bbox fractions of slide area → inches on the PPTX canvas."""
+    x1, y1, x2, y2 = bbox
+    x = x1 * SLIDE_W
+    y = y1 * SLIDE_H
+    w = max(0.1, (x2 - x1) * SLIDE_W)
+    h = max(0.05, (y2 - y1) * SLIDE_H)
+    return x, y, w, h
+
+
 def _estimate_text_height(text: str, font_pt: int, width_in: float) -> float:
-    """Rough height (inches) for word-wrapped ``text`` in a box of ``width_in``."""
     text = text or ""
-    # Approximate average glyph width as 0.55 * font size.
     char_w_in = (font_pt * 0.55) / 72.0
     chars_per_line = max(1, int(width_in / char_w_in))
     explicit_lines = text.count("\n") + 1
@@ -77,17 +78,16 @@ def _estimate_text_height(text: str, font_pt: int, width_in: float) -> float:
     )
     lines = max(explicit_lines, wrapped_lines)
     line_h_in = (font_pt * 1.25) / 72.0
-    return lines * line_h_in + 0.12  # small padding for the textbox insets
+    return lines * line_h_in + 0.12
 
 
-def _add_text(slide, el: dict, x: float, y: float, w: float, *, default_color: str):
-    """Add a textbox for a text element; return its height in inches."""
+def _add_text_at(slide, el: dict, x: float, y: float, w: float, h: float,
+                 *, default_color: str) -> None:
+    text = el.get("text", "") or ""
     size_key = el.get("size", "body")
     font_pt = FONT_PT.get(size_key, FONT_PT["body"])
-    text = el.get("text", "") or ""
 
-    height = _estimate_text_height(text, font_pt, w)
-    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(height))
+    box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = box.text_frame
     tf.word_wrap = True
     tf.vertical_anchor = MSO_ANCHOR.TOP
@@ -103,56 +103,56 @@ def _add_text(slide, el: dict, x: float, y: float, w: float, *, default_color: s
     if bg:
         box.fill.solid()
         box.fill.fore_color.rgb = _rgb(bg, "FFFFFF")
-    return height
 
 
-def _add_image(slide, el: dict, out_dir: Path, x: float, y: float,
-               w: float | None = None, h: float | None = None):
-    """Add an image_crop picture; pass w or h (or both) to control size."""
+def _add_image_at(slide, el: dict, out_dir: Path,
+                  x: float, y: float, w: float, h: float) -> None:
     crop_path = el.get("crop_path")
     if not crop_path:
-        return None
+        return
     full = out_dir / crop_path
     if not full.exists():
-        return None
-    kwargs: dict = {}
-    if w is not None:
-        kwargs["width"] = Inches(w)
-    if h is not None:
-        kwargs["height"] = Inches(h)
-    slide.shapes.add_picture(str(full), Inches(x), Inches(y), **kwargs)
-    return h
+        return
+    from PIL import Image as _Image
+    with _Image.open(full) as im:
+        iw, ih = im.size
+    if not iw or not ih:
+        return
+    # Fit within the bbox while preserving aspect ratio.
+    aspect = iw / ih
+    fit_w = min(w, h * aspect)
+    fit_h = fit_w / aspect
+    slide.shapes.add_picture(str(full), Inches(x), Inches(y),
+                             width=Inches(fit_w), height=Inches(fit_h))
 
 
 def build_pptx(extracted: list[dict], out_dir: str | Path) -> Path:
-    """Build ``output.pptx`` from the extracted slide list.
-
-    ``extracted`` is the Stage 3/4 output (with ``crop_path`` fields).
-    Returns the path to the written ``.pptx`` file.
-    """
     out_dir = Path(out_dir)
 
     prs = Presentation()
     prs.slide_width = Inches(SLIDE_W)
     prs.slide_height = Inches(SLIDE_H)
-    blank_layout = prs.slide_layouts[6]  # fully blank layout
+    blank_layout = prs.slide_layouts[6]
 
     for slide_data in extracted:
         slide = prs.slides.add_slide(blank_layout)
 
-        # Background fill.
         bg_hex = slide_data.get("background_color")
         if bg_hex:
             slide.background.fill.solid()
             slide.background.fill.fore_color.rgb = _rgb(bg_hex, "FFFFFF")
 
-        # Title.
+        # --- Title ---
         title = slide_data.get("title")
         if title and title.get("text"):
+            bbox = title.get("bbox")
+            if bbox and len(bbox) == 4:
+                tx, ty, tw, th = _bbox_to_rect(bbox)
+            else:
+                tx, ty, tw, th = (TITLE_BOX["x"], TITLE_BOX["y"],
+                                  TITLE_BOX["w"], TITLE_BOX["h"])
             box = slide.shapes.add_textbox(
-                Inches(TITLE_BOX["x"]), Inches(TITLE_BOX["y"]),
-                Inches(TITLE_BOX["w"]), Inches(TITLE_BOX["h"]),
-            )
+                Inches(tx), Inches(ty), Inches(tw), Inches(th))
             tf = box.text_frame
             tf.word_wrap = True
             run = tf.paragraphs[0].add_run()
@@ -161,56 +161,68 @@ def build_pptx(extracted: list[dict], out_dir: str | Path) -> Path:
             run.font.bold = bool(title.get("bold", True))
             run.font.color.rgb = _rgb(title.get("color"), "E07B00")
 
+        # --- Column elements ---
         columns = slide_data.get("columns", []) or []
         geom = _resolve_layout(slide_data.get("layout", "single"), columns)
         n_cols = len(geom["x"])
 
         for column in columns:
-            idx = column.get("index", 0)
-            if idx >= n_cols:
-                idx = n_cols - 1  # clamp extra columns into the last slot
+            idx = min(column.get("index", 0), n_cols - 1)
             col_x = geom["x"][idx]
             col_w = geom["w"][idx]
+            cursor_y = CONTENT_TOP  # fallback cursor for bbox-less elements
 
-            cursor_y = CONTENT_TOP
             for el in column.get("elements", []):
                 el_type = el.get("type")
+                bbox = el.get("bbox")
 
-                if el_type == "image_crop":
-                    crop_path = el.get("crop_path")
-                    if not crop_path or not (out_dir / crop_path).exists():
-                        continue
-                    from PIL import Image as _Image
-                    with _Image.open(out_dir / crop_path) as im:
-                        iw, ih = im.size
-                    if not iw:
-                        continue
-                    max_h = BOTTOM_LIMIT - cursor_y - 0.05
-                    if max_h < 0.2:
-                        continue
-                    h_at_full_w = col_w * ih / iw
-                    if h_at_full_w <= max_h:
-                        # Fits at full column width — scale by width only.
-                        _add_image(slide, el, out_dir, col_x, cursor_y, w=col_w)
-                        height = h_at_full_w
+                if bbox and len(bbox) == 4:
+                    # Primary path: place element exactly at its bbox position.
+                    ex, ey, ew, eh = _bbox_to_rect(bbox)
+                    if el_type == "image_crop":
+                        _add_image_at(slide, el, out_dir, ex, ey, ew, eh)
                     else:
-                        # Too tall — constrain by available height, let width shrink.
-                        _add_image(slide, el, out_dir, col_x, cursor_y, h=max_h)
-                        height = max_h
+                        _add_text_at(slide, el, ex, ey, ew, eh,
+                                     default_color="000000")
+                    cursor_y = ey + eh + ELEMENT_GAP
                 else:
-                    size_key = el.get("size", "body")
-                    font_pt = FONT_PT.get(size_key, FONT_PT["body"])
-                    height = _estimate_text_height(
-                        el.get("text", ""), font_pt, col_w
-                    )
-                    if cursor_y + height > BOTTOM_LIMIT:
-                        continue
-                    _add_text(
-                        slide, el, col_x, cursor_y, col_w,
-                        default_color="000000",
-                    )
-
-                cursor_y += height + ELEMENT_GAP
+                    # Fallback: stack with cursor (no bbox returned by Vision).
+                    if el_type == "image_crop":
+                        crop_path = el.get("crop_path")
+                        if not crop_path or not (out_dir / crop_path).exists():
+                            continue
+                        from PIL import Image as _Image
+                        with _Image.open(out_dir / crop_path) as im:
+                            iw, ih = im.size
+                        if not iw:
+                            continue
+                        max_h = BOTTOM_LIMIT - cursor_y - 0.05
+                        if max_h < 0.2:
+                            continue
+                        h_at_full_w = col_w * ih / iw
+                        if h_at_full_w <= max_h:
+                            slide.shapes.add_picture(
+                                str(out_dir / crop_path),
+                                Inches(col_x), Inches(cursor_y),
+                                width=Inches(col_w))
+                            height = h_at_full_w
+                        else:
+                            slide.shapes.add_picture(
+                                str(out_dir / crop_path),
+                                Inches(col_x), Inches(cursor_y),
+                                height=Inches(max_h))
+                            height = max_h
+                        cursor_y += height + ELEMENT_GAP
+                    else:
+                        size_key = el.get("size", "body")
+                        font_pt = FONT_PT.get(size_key, FONT_PT["body"])
+                        height = _estimate_text_height(
+                            el.get("text", ""), font_pt, col_w)
+                        if cursor_y + height > BOTTOM_LIMIT:
+                            continue
+                        _add_text_at(slide, el, col_x, cursor_y, col_w, height,
+                                     default_color="000000")
+                        cursor_y += height + ELEMENT_GAP
 
     out_path = out_dir / "output.pptx"
     prs.save(str(out_path))

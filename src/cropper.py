@@ -47,6 +47,16 @@ def crop_images(extracted: list[dict], out_dir: str | Path) -> None:
             W, H = img.size
             slide_img = img.convert("RGB")
 
+            # Convert slide-content-area bbox fractions → full-image pixel coords.
+            # Vision returns slide_area=[x1,y1,x2,y2] as fractions of the full
+            # image; element bboxes are fractions of that slide content area.
+            sa = slide.get("slide_area", [0.0, 0.0, 1.0, 1.0])
+            sa_x1, sa_y1, sa_x2, sa_y2 = sa
+            sa_px_x = sa_x1 * W
+            sa_px_y = sa_y1 * H
+            sa_w = (sa_x2 - sa_x1) * W
+            sa_h = (sa_y2 - sa_y1) * H
+
             # Counter for unique crop names — the Vision model does not always
             # return an "id" field on elements, so we cannot rely on it.
             crop_index = 0
@@ -59,10 +69,10 @@ def crop_images(extracted: list[dict], out_dir: str | Path) -> None:
                     if not bbox or len(bbox) != 4:
                         continue
 
-                    x1 = max(0, int(bbox[0] * W) - PADDING_PX)
-                    y1 = max(0, int(bbox[1] * H) - PADDING_PX)
-                    x2 = min(W, int(bbox[2] * W) + PADDING_PX)
-                    y2 = min(H, int(bbox[3] * H) + PADDING_PX)
+                    x1 = max(0, int(sa_px_x + bbox[0] * sa_w) - PADDING_PX)
+                    y1 = max(0, int(sa_px_y + bbox[1] * sa_h) - PADDING_PX)
+                    x2 = min(W, int(sa_px_x + bbox[2] * sa_w) + PADDING_PX)
+                    y2 = min(H, int(sa_px_y + bbox[3] * sa_h) + PADDING_PX)
 
                     if (x2 - x1) < MIN_CROP_PX or (y2 - y1) < MIN_CROP_PX:
                         continue

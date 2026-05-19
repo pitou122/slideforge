@@ -40,6 +40,18 @@ EXCLUDE:
 ✗ Presentation UI chrome (cursor menus, toolbars, pointer icons)
 ✗ Any image clearly unrelated to IELTS academic content
 
+SLIDE CONTENT AREA (report this first):
+Identify the actual presentation slide canvas — the white/light rectangle that is the
+slide itself — separate from any surrounding application chrome (ribbon, toolbar,
+slide-thumbnail panel, title bar, taskbar, webcam overlay).
+Report "slide_area": [x1, y1, x2, y2] as 0.0–1.0 fractions of the FULL input image.
+If the full image IS the slide with no chrome, report [0.0, 0.0, 1.0, 1.0].
+
+BOUNDING BOXES — required on EVERY element (text, badge, image — all types):
+- bbox: [x1, y1, x2, y2] as 0.0–1.0 fractions of the SLIDE CONTENT AREA only.
+  Top-left corner of the slide = [0, 0]. Bottom-right corner = [1, 1].
+  Do NOT use full-image coordinates. Always normalize to the slide area.
+
 COLOR RULES — for every text element extract:
 - color: closest hex (e.g. "#E07B00" for orange, "#000000" for black)
 - background: hex if text sits on a colored box, else null
@@ -49,7 +61,7 @@ COLOR RULES — for every text element extract:
 CHART/IMAGE CROP RULES — when you see a chart, graph, or table:
 - type: "image_crop"
 - chart_type: "bar" | "line" | "pie" | "table" | "mixed" | "unknown"
-- bbox: [x1_pct, y1_pct, x2_pct, y2_pct] as 0.0–1.0 percentages of image size
+- bbox: [x1, y1, x2, y2] fractions of the SLIDE CONTENT AREA (same rule as above)
 - chart_title: title text on the chart itself, or null
 - description: 1-sentence summary of what the chart shows
 - DO NOT extract data values from charts
